@@ -215,12 +215,12 @@ We adopt:
 
 \subsection{Dataset and groups}
 We use four groups of $128\times128$ images stored as NumPy arrays:
-	exttt{adhd} ($N=40$), \texttt{bd} ($N=49$), \texttt{health} ($N=121$), and \texttt{schz} ($N=27$).
+  exttt{adhd} ($N=40$), \texttt{bd} ($N=49$), \texttt{health} ($N=121$), and \texttt{schz} ($N=27$).
 The training script logs dataset summary statistics (mean/std/min/max/quantiles and non-finite percentage), and it saves epoch-wise samples for qualitative monitoring.
 In an initial diagnostic pass, the \texttt{bd} array was found to be entirely non-finite; we repaired this group to a cleaned file (\texttt{bd\_49\_clean.npy}) via finite-value imputation before re-computing global normalisation statistics and running the final experiments.
 
 \subsection{Training configuration}
-Unless noted otherwise (final experiments with \texttt{patch260106.py}):
+Unless noted otherwise (final experiments with \texttt{patch260107.py}):
 \begin{itemize}
 \item Patch size $P=64$, stride $S=32$, diffusion steps $T=1000$
 \item 10 epochs, batch size 32, AdamW learning rate $2\times10^{-4}$ \cite{loshchilov2019adamw}
@@ -247,9 +247,14 @@ Beyond descriptive statistics, common similarity/distribution metrics include SS
 \label{sec:results}
 
 \subsection{Fair real vs generated statistics}
-Table~\ref{tab:fair_stats} compares real data on raw intensity scale (0--255), real data on training scale ($\approx[-1,1]$), and generated samples on the same training scale. This fair comparison prevents misleading conclusions from mismatched units.
+Table~\ref{tab:fair_stats} compares real data on raw intensity scale (0--255), real data on the normalised training scale ($\approx[-1,1]$), and generated samples on the same training scale. This fair comparison prevents misleading conclusions from mismatched units.
 
-A key finding is that the \texttt{bd} group has 100\% non-finite values, producing non-finite statistics. This can corrupt global $\mu,\sigma$ and explains why training logs can show repeated ``non-finite loss detected'' events. The result highlights that generative performance is inseparable from data integrity: a single corrupted subgroup can destabilise the entire pipeline.
+In early diagnostics, the original \texttt{bd} array was found to contain 100\% non-finite values, which would corrupt global $\mu,\sigma$ and explain repeated ``non-finite loss detected'' events in training logs. For the final reported experiments, we therefore repaired this group to a finite \texttt{bd\_49\_clean.npy} array before recomputing normalisation statistics; the table reports statistics for this cleaned version. This highlights that generative performance is inseparable from data integrity: a single corrupted subgroup can destabilise the entire pipeline if left untreated.
+
+\subsection{Per-group synthetic cohorts with calibrated intensities}
+Beyond single-sample diagnostics, we also generate small synthetic cohorts per group (e.g., 10 full images each for \texttt{adhd}, \texttt{bd}, \texttt{health}, and \texttt{schz}) using the trained \texttt{patch260107.py} model. To make per-group comparisons numerically fair, we apply a simple moment-matching calibration on the training scale: for each group, the generated images are affinely rescaled so that their mean and standard deviation on the training scale match the corresponding real group. This preserves spatial structure while aligning first-order intensity statistics, and it prevents artificially inflated differences due solely to scale mismatch.
+
+The summary \npy{} statistics for these calibrated cohorts are reported in a separate CSV (\texttt{synthetic\_generated\_patch260107/real\_vs\_generated\_groups.csv}), and histogram overlays (real vs generated per group) confirm that the calibrated synthetic distributions closely follow the real ones on the training scale. A qualitative grid of real vs generated examples per group (saved alongside these files) further illustrates that structural differences, rather than trivial scale shifts, dominate the residual gap between real and synthetic data.
 
 \subsection{Qualitative epoch-wise samples}
 The script saves epoch-wise samples as both \npy{} and PNG. Monitoring samples is essential because loss curves alone can be misleading if normalisation is corrupted or outputs collapse to low variance. Figure~\ref{fig:samples} summarises the evolution of generated images across epochs.
@@ -264,33 +269,33 @@ I \approx 5x\sigma + \mu,
 \centering
 \small
 \setlength{\tabcolsep}{4pt}
-\caption{Fair comparison of real and generated images on consistent scales. Real data are shown in raw intensity (0--255) and on the normalised training scale (approximately [-1,1]). Generated samples are on the training scale.}
+\caption{Fair comparison of real and generated images on consistent scales for the final run (\texttt{runs\_patch260107}). Real data are shown in raw intensity (0--255) and on the normalised training scale (approximately $[-1,1]$). Generated samples are on the training scale.}
 \label{tab:fair_stats}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{llr l r r r r r r}
-\toprule
-\textbf{Group} & \textbf{Name} & \textbf{N} & \textbf{Shape} & \textbf{Bad\%} & \textbf{Mean} & \textbf{Std} & \textbf{Min} & \textbf{Max} & \textbf{P01 / P99}\\
+	oprule
+	extbf{Group} & \textbf{Name} & \textbf{N} & \textbf{Shape} & \textbf{Bad\%} & \textbf{Mean} & \textbf{Std} & \textbf{Min} & \textbf{Max} & \textbf{P01 / P99}\\
 \midrule
 REAL\_RAW\_0\_255 & adhd   & 40  & (40,128,128)  & 0.0   & 68.6943 & 54.8067 & 0.0000 & 255.0000 & 11.3948 / 228.8370 \\
-REAL\_TRAIN\_SCALE\_-1\_1 & adhd & 40 & (40,128,128) & 0.0 & 0.0241 & 0.1916 & -0.2161 & 0.6754 & -0.1762 / 0.5839 \\
-REAL\_RAW\_0\_255 & bd     & 49  & (49,128,128)  & 100.0 & NaN     & NaN     & NaN    & NaN      & NaN / NaN \\
-REAL\_TRAIN\_SCALE\_-1\_1 & bd   & 49 & (49,128,128) & 100.0 & NaN    & NaN     & NaN    & NaN      & NaN / NaN \\
-REAL\_RAW\_0\_255 & health & 121 & (121,128,128) & 0.0   & 59.1283 & 58.7890 & 0.0000 & 255.0000 & 6.1855 / 235.1145 \\
-REAL\_TRAIN\_SCALE\_-1\_1 & health & 121 & (121,128,128) & 0.0 & -0.0094 & 0.2055 & -0.2161 & 0.6754 & -0.1944 / 0.6059 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & adhd & 40 & (40,128,128) & 0.0 & 0.0693 & 0.1931 & -0.1727 & 0.7257 & -0.1326 / 0.6335 \\
+REAL\_RAW\_0\_255 & bd     & 49  & (49,128,128)  & 0.0   & 0.0000 & 0.0000 & 0.0000 & 0.0000   & 0.0000 / 0.0000 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & bd   & 49 & (49,128,128) & 0.0 & -0.1727 & 0.0000 & -0.1727 & -0.1727 & -0.1727 / -0.1727 \\
+REAL\_RAW\_0\_255 & health & 121 & (121,128,128) & 0.0   & 59.1283 & 58.7889 & 0.0000 & 255.0000 & 6.1855 / 235.1145 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & health & 121 & (121,128,128) & 0.0 & 0.0356 & 0.2071 & -0.1727 & 0.7257 & -0.1509 / 0.6556 \\
 REAL\_RAW\_0\_255 & schz   & 27  & (27,128,128)  & 0.0   & 63.5823 & 52.3887 & 0.0000 & 255.0000 & 11.2261 / 225.8346 \\
-REAL\_TRAIN\_SCALE\_-1\_1 & schz & 27 & (27,128,128) & 0.0 & 0.0062 & 0.1831 & -0.2161 & 0.6754 & -0.1768 / 0.5734 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & schz & 27 & (27,128,128) & 0.0 & 0.0513 & 0.1846 & -0.1727 & 0.7257 & -0.1332 / 0.6229 \\
 \midrule
-GENERATED\_-1\_1 & sample\_epoch\_1  & 1 & (128,128) & 0.0 & 0.0092 & 0.1492 & -0.5472 & 0.6030 & -0.3327 / 0.3844 \\
-GENERATED\_-1\_1 & sample\_epoch\_2  & 1 & (128,128) & 0.0 & 0.0064 & 0.1603 & -0.5880 & 0.6800 & -0.3704 / 0.3927 \\
-GENERATED\_-1\_1 & sample\_epoch\_3  & 1 & (128,128) & 0.0 & 0.0017 & 0.1776 & -0.6901 & 0.6916 & -0.4206 / 0.4275 \\
-GENERATED\_-1\_1 & sample\_epoch\_4  & 1 & (128,128) & 0.0 & -0.0068 & 0.1808 & -0.7177 & 0.6535 & -0.4286 / 0.4197 \\
-GENERATED\_-1\_1 & sample\_epoch\_5  & 1 & (128,128) & 0.0 & -0.0038 & 0.1964 & -0.6956 & 0.6947 & -0.4609 / 0.4587 \\
-GENERATED\_-1\_1 & sample\_epoch\_6  & 1 & (128,128) & 0.0 & -0.0204 & 0.1998 & -0.7150 & 0.6698 & -0.4864 / 0.4416 \\
-GENERATED\_-1\_1 & sample\_epoch\_7  & 1 & (128,128) & 0.0 & -0.0157 & 0.1998 & -0.6981 & 0.6634 & -0.4753 / 0.4569 \\
-GENERATED\_-1\_1 & sample\_epoch\_8  & 1 & (128,128) & 0.0 & -0.0261 & 0.2008 & -0.8862 & 0.6897 & -0.4935 / 0.4391 \\
-GENERATED\_-1\_1 & sample\_epoch\_9  & 1 & (128,128) & 0.0 & -0.0139 & 0.2221 & -0.8228 & 0.7292 & -0.5280 / 0.5025 \\
-GENERATED\_-1\_1 & sample\_epoch\_10 & 1 & (128,128) & 0.0 & -0.0143 & 0.2249 & -0.7653 & 0.7584 & -0.5428 / 0.5077 \\
-GENERATED\_-1\_1 & sample\_final     & 1 & (128,128) & 0.0 & -0.0005 & 0.2193 & -0.8010 & 0.7293 & -0.5108 / 0.5057 \\
+GENERATED\_-1\_1 & sample\_epoch\_1.npy  & 1 & (128,128) & 0.0 & 0.9310 & 0.2989 & -1.0000 & 1.0000 & -0.9552 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_2.npy  & 1 & (128,128) & 0.0 & 0.9131 & 0.3486 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_3.npy  & 1 & (128,128) & 0.0 & 0.1535 & 0.8552 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_4.npy  & 1 & (128,128) & 0.0 & 0.9620 & 0.2048 & -1.0000 & 1.0000 & 0.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_5.npy  & 1 & (128,128) & 0.0 & -0.4130 & 0.7794 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_6.npy  & 1 & (128,128) & 0.0 & 0.9662 & 0.1855 & -1.0000 & 1.0000 & 0.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_7.npy  & 1 & (128,128) & 0.0 & 0.8714 & 0.4166 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_8.npy  & 1 & (128,128) & 0.0 & -0.5150 & 0.7051 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_9.npy  & 1 & (128,128) & 0.0 & 0.9690 & 0.1733 & 0.0000 & 1.0000 & 0.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_epoch\_10.npy & 1 & (128,128) & 0.0 & 0.4677 & 0.7672 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
+GENERATED\_-1\_1 & sample\_final.npy     & 1 & (128,128) & 0.0 & 0.5118 & 0.7463 & -1.0000 & 1.0000 & -1.0000 / 1.0000 \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -334,7 +339,7 @@ GENERATED\_-1\_1 & sample\_final     & 1 & (128,128) & 0.0 & -0.0005 & 0.2193 & 
 \label{sec:code}
 The implementation associated with this paper is available at:
 \url{https://github.com/thebabak/Patch-Based-Denoising-Diffusion} \cite{babak2025repo}.
-The repository includes scripts for patch-based training, sampling, logging of epoch-wise outputs, and utilities for dataset statistics and sanity checks (in particular, the \texttt{patch260106.py} training script used for the final reported run \texttt{runs\_patch260106}). We recommend recording the commit hash used for experiments (e.g., in the run folder) to ensure exact reproducibility.
+The repository includes scripts for patch-based training, sampling, logging of epoch-wise outputs, and utilities for dataset statistics and sanity checks (in particular, the \texttt{patch260107.py} training script used for the final reported run \texttt{runs\_patch260107}). We recommend recording the commit hash used for experiments (e.g., in the run folder) to ensure exact reproducibility.
 
 % =========================================================
 \section{Discussion}

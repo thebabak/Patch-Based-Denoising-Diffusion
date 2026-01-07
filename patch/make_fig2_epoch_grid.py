@@ -9,7 +9,7 @@ def load_img(path):
         a = a[0]
     return a
 
-def main(outdir="paper_assets", samples_dir="runs_proposal_patchddpm", vmin=-1.0, vmax=1.0):
+def main(outdir="paper_assets", samples_dir="runs_patch260107", vmin=-1.0, vmax=1.0):
     os.makedirs(outdir, exist_ok=True)
 
     epoch_paths = []
