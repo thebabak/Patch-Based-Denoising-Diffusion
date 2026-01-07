@@ -40,15 +40,14 @@ def load_loss_history(outdir):
     return last
 
 def main():
-    # ---- EDIT THESE IF NEEDED ----
-    outdir = "runs_proposal_patchddpm"
+    # Use the latest good run from patch260107.py
+    outdir = "runs_patch260107"
     real_paths = {
         "adhd": r"synthetic_npy\adhd_40.npy",
-        "bd": r"synthetic_npy\bd_49.npy",
+        "bd": r"synthetic_npy\bd_49_clean.npy",  # cleaned version
         "health": r"synthetic_npy\health_121.npy",
         "schz": r"synthetic_npy\schz_27.npy",
     }
-    # -----------------------------
 
     rows = []
 

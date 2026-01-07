@@ -55,10 +55,10 @@ def load_loss(outdir):
     }
 
 def main():
-    outdir = "runs_proposal_patchddpm"
+    outdir = "runs_patch260107"
     real_paths = {
         "adhd": r"synthetic_npy\adhd_40.npy",
-        "bd": r"synthetic_npy\bd_49.npy",  # change to bd_49_clean.npy after cleaning
+        "bd": r"synthetic_npy\bd_49_clean.npy",
         "health": r"synthetic_npy\health_121.npy",
         "schz": r"synthetic_npy\schz_27.npy",
     }

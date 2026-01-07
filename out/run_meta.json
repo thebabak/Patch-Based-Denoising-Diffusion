@@ -1,0 +1,20 @@
+{
+  "mode": "train",
+  "seed": 0,
+  "device": "cuda",
+  "split_sizes": {
+    "train": 166,
+    "val": 35,
+    "test": 36
+  },
+  "T": 200,
+  "lr": 0.0002,
+  "batch_size": 32,
+  "amp": false,
+  "use_ema": false,
+  "base": 64,
+  "time_dim": 128,
+  "dropout": 0.05,
+  "beta_start": 0.0001,
+  "beta_end": 0.02
+}

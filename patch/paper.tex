@@ -1,0 +1,536 @@
+% =========================================================
+% Patch-Based Denoising Diffusion with Overlap Consistency
+% and Hann-Window Blending for Small-Scale Neuroimaging-Like Data
+% Single-file LaTeX (no BibTeX)
+% =========================================================
+
+\documentclass[11pt]{article}
+
+% ---------- Page / Typography ----------
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+
+% ---------- Figures / Tables ----------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{adjustbox}
+
+% ---------- Math ----------
+\usepackage{amsmath,amssymb}
+
+% ---------- Links / URLs ----------
+\usepackage{hyperref}
+\usepackage{url}
+
+% ---------- Color ----------
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+% --- Helpful macros ---
+\newcommand{\ddpm}{\textsc{DDPM}}
+\newcommand{\unet}{\textsc{U-Net}}
+\newcommand{\hann}{\textsc{Hann}}
+\newcommand{\npy}{\texttt{.npy}}
+
+\title{Patch-Based Denoising Diffusion with Overlap Consistency and Hann-Window Blending\\
+for Small-Scale Neuroimaging-Like Data}
+
+\author{
+Babak Bayanian\\
+\small University of Tehran\\
+\small \texttt{me@thebabak.net}
+\and
+Saeed Masoudnia\\
+\small University of Tehran\\
+\small \texttt{saeed.email@domain.com}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Diffusion models are attractive for medical and neuroimaging pipelines because they are stable to train and can produce high-quality samples, but they often require large datasets and long training schedules. In many clinical contexts, however, cohorts are small, access is constrained, and computational budgets are limited. We present a practical patch-based diffusion pipeline that (i) increases the number of effective training instances via random patch extraction, (ii) supports optional class-conditioning and coordinate channels for spatial awareness, and (iii) reconstructs full-resolution images using overlap-aware synthesis. To reduce visible seams when reassembling independently generated patches, we combine two complementary mechanisms: (a) an \emph{overlap-consistency regularizer} computed on predicted clean patches in shared overlap regions, and (b) \hann-window weighted blending during patch-grid reconstruction. We evaluate the pipeline on small-scale neuroimaging-like arrays stored as NumPy tensors and report a fair, scale-consistent comparison of real and generated intensity statistics. Importantly, our logging detects a data integrity issue in one group (100\% non-finite values), which can corrupt global normalisation and cause non-finite diffusion losses. The paper emphasises reproducible implementation details (epoch-wise sampling, automatic sanity checks, and clear reporting of scales) that are essential for diffusion modelling on limited and imperfect medical datasets.
+\end{abstract}
+
+\noindent\textbf{Code:} \href{https://github.com/thebabak/Patch-Based-Denoising-Diffusion}{https://github.com/thebabak/Patch-Based-Denoising-Diffusion}
+
+\noindent\textbf{Keywords:} diffusion models; patch-based generation; overlap consistency; Hann-window blending; medical image synthesis; neuroimaging augmentation; coordinate channels.
+
+% =========================================================
+\section{Introduction}
+\label{sec:intro}
+
+Diffusion models have become a leading approach for high-fidelity image synthesis due to stable optimisation and strong sample quality \cite{sohl2015thermo,ho2020ddpm,nichol2021improved,song2021sde,dhariwal2021beatgans}. In medical and neuroimaging pipelines, generative models are increasingly used for privacy-preserving data sharing, augmentation, and robustness to acquisition shifts. However, diffusion models are typically developed under large-data and high-compute assumptions, which often do not hold in clinical settings.
+
+\paragraph{Small-cohort and imperfect-data reality.}
+Real clinical cohorts are frequently small due to acquisition costs, strict inclusion criteria, and privacy/regulatory limitations. In addition, the data itself is often imperfect: preprocessing, file conversion, or upstream synthesis can introduce NaNs/Infs and silently corrupt global normalisation statistics, causing non-finite diffusion losses and unreliable training. These issues are especially relevant for compact neuroimaging-like datasets stored as arrays (e.g., NumPy tensors) and processed through multi-stage pipelines.
+
+\paragraph{Why patch-based diffusion helps\textemdash and what it breaks.}
+Patch-based training is a standard strategy in biomedical imaging because it increases the number of effective training instances and reduces memory pressure compared to full-image training \cite{ronneberger2015unet}. For diffusion models, random patch extraction can act as an implicit data amplification mechanism: a single image yields many spatially distinct views, enabling more stochastic updates per epoch under limited data. Yet, patch-wise \emph{generation} introduces a practical bottleneck: independently generated patches can disagree at boundaries, producing seams and discontinuities when tiled back into full-resolution images. Overlap-weighted blending (e.g., cosine or \hann windows) reduces seam visibility, but blending alone does not enforce agreement in overlapping regions.
+
+\paragraph{Our approach.}
+We present a patch-based diffusion pipeline that targets small-scale neuroimaging-like arrays and explicitly addresses both (i) data scarcity and (ii) seam artefacts in patch-wise generation. During training, we sample patches and overlapping patch pairs from each image and optimise a standard diffusion denoising objective together with an \emph{overlap-consistency} regulariser computed on predicted clean patches in the shared overlap region. During inference, we synthesise patches on an overlapping grid and reconstruct full images using \hann-window weighted blending. In addition, we treat dataset integrity checks as a first-class component of the pipeline: we log non-finite ratios and robust summary statistics to detect corrupted subgroups that can otherwise destabilise training.
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item \textbf{Patch-based diffusion for small neuroimaging-like arrays:} a practical \ddpm{} pipeline designed for small cohorts stored as NumPy tensors, with explicit scale-consistent reporting and reproducible training/sampling procedures.
+\item \textbf{Overlap-consistency regularisation:} a simple, effective constraint that encourages two overlapping patches from the same image to predict compatible clean reconstructions $\hat{x}_0$ in the shared overlap region, directly targeting seam artefacts.
+\item \textbf{Seam-reduced full-image synthesis:} overlapping-grid sampling and \hann-window weighted blending to reassemble independently generated patches into full-resolution images with reduced boundary artefacts.
+\item \textbf{Optional spatial and class conditioning:} support for coordinate channels (CoordConv-style) and class-conditioning to reduce positional ambiguity in patch generation and improve coherence across the reconstructed image.
+\item \textbf{Data integrity diagnostics for diffusion stability:} automatic sanity checks (non-finite detection and robust statistics) that identify corrupted groups capable of breaking global normalisation and causing non-finite diffusion losses, with clear guidance for repair/removal.
+\end{itemize}
+
+% =========================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Diffusion models and efficient sampling}
+Diffusion-style generative modelling was introduced via nonequilibrium thermodynamics \cite{sohl2015thermo} and later popularised in the modern \ddpm{} framework with a forward noising process and a learned reverse denoiser \cite{ho2020ddpm}. Subsequent work improved schedules and modelling choices to increase likelihood and sample fidelity \cite{nichol2021improved,dhariwal2021beatgans,kingma2021vdm}. Score-based generative modelling provides an SDE-based view that unifies diffusion variants under a common theoretical framework \cite{song2021sde}.
+
+Sampling speed is a major practical constraint. DDIM provides an implicit sampler that can reduce sampling steps substantially \cite{song2020ddim}. EDM clarifies the design space of diffusion models and offers improved parameterisations and sampling strategies \cite{karras2022edm}. DPM-Solver enables fast ODE-based sampling in a small number of steps \cite{lu2022dpmsolver}. Classifier-free guidance improves conditional generation quality without training a separate classifier \cite{ho2022cfg}. Latent diffusion moves diffusion to a learned latent space to reduce compute while preserving perceptual detail \cite{rombach2022ldm}. Diffusion has also been adapted to inverse problems and restoration settings, where denoising priors can be combined with measurement constraints \cite{kawar2022ddrm,saharia2021sr3}.
+
+\subsection{Patch-based learning and reconstruction}
+Patch-based training is common in medical imaging because full-image training is often memory-limited. \unet{} popularized overlap-tile inference strategies for large images \cite{ronneberger2015unet}. In generative modelling, patch-based diffusion can improve data efficiency by expanding each image into many training patches and enabling training on commodity GPUs. Patch Diffusion studies generation as a collection of patches and emphasises positional context in patch modelling \cite{wang2023patchdiffusion}. However, independently generated patches can conflict at boundaries. Overlap-weighted blending (cosine/\hann) mitigates seams by down-weighting borders, but it does not enforce consistency in overlap regions, motivating explicit regularisation.
+
+\subsection{Consistency regularisation across views}
+Consistency regularisation is widely used in semi-/self-supervised learning: predictions should be compatible across perturbations or multiple views of the same underlying signal. In patch-based diffusion, two overlapping crops provide a natural multi-view constraint: their shared region should agree after denoising. This directly targets seam artifacts and promotes local coherence in reconstructed full images.
+
+\subsection{Spatial conditioning with coordinate channels}
+CNNs can struggle to represent absolute position due to translation equivariance. CoordConv injects explicit positional signals by concatenating coordinate channels and improves learning for location-dependent mappings \cite{liu2018coordconv}. In patch-based generation, coordinates reduce ambiguity about where a patch belongs in the global frame and can improve global coherence when reconstructing from local generations.
+
+\subsection{Diffusion for medical imaging}
+Diffusion models have rapidly expanded into medical imaging for synthesis, reconstruction, restoration, uncertainty estimation, and augmentation. Surveys summarise the landscape and common evaluation patterns \cite{kazerouni2023medsurvey}. Diffusion has also been explored for segmentation ensembles and uncertainty modelling \cite{wolleb2022midl}. These trends motivate a practical, reproducible patch-based diffusion approach tailored to small datasets and imperfect clinical data.
+
+% =========================================================
+\section{Method}
+\label{sec:method}
+
+Figure~\ref{fig:pipeline} summarises the pipeline: we extract random patches (and overlapping patch pairs), train a conditional patch \ddpm{}, enforce overlap consistency on predicted clean patches, and reconstruct full images using \hann blending over an overlapping patch grid.
+
+\subsection{Data format and preprocessing}
+\label{sec:data}
+Each group/class is stored as a NumPy array of shape $(N, H, W)$ (here $H=W=128$). Because diffusion training is sensitive to normalisation, we compute dataset validity statistics:
+\begin{itemize}
+\item \textbf{Bad\%}: proportion of pixels that are non-finite (NaN/Inf).
+\item \textbf{Min/Max and quantiles}: sanity checks for dynamic range and outliers.
+\end{itemize}
+If non-finite values exist, they must be removed or repaired before computing normalisation parameters.
+
+\subsection{Normalization}
+\label{sec:norm}
+We compute a global mean $\mu$ and standard deviation $\sigma$ on valid pixels and map intensities to a bounded training scale:
+\begin{equation}
+x = \mathrm{clip}\left(\frac{I-\mu}{\sigma},-5,5\right)/5,
+\label{eq:norm}
+\end{equation}
+yielding values approximately in $[-1,1]$ and reducing extreme outliers that may destabilize training. If $\mu$ or $\sigma$ become non-finite (e.g., due to corrupted arrays), inputs and losses can become non-finite.
+
+\subsection{Patch extraction and overlap-pair sampling}
+\label{sec:patch}
+We sample patches of size $P\times P$ from random top-left positions $(i,j)$. To support overlap consistency, we also sample a second patch from the same image with a nearby offset $(i+\Delta i, j+\Delta j)$ such that the two patches overlap by a controlled amount. Let the shared overlap region be denoted by $\Omega$ (computed geometrically). Patch-level augmentations include flips/rotations and mild intensity jitter.
+
+\subsection{Forward diffusion process}
+\label{sec:forward}
+Using a cosine noise schedule \cite{nichol2021improved}, the forward noising process is:
+\begin{equation}
+x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\epsilon,\quad \epsilon\sim\mathcal{N}(0,I),
+\label{eq:forward}
+\end{equation}
+where $\bar{\alpha}_t$ is the cumulative product of $(1-\beta_t)$. The model learns to reverse this corruption process.
+
+\subsection{Model architecture and conditioning}
+\label{sec:model}
+We employ a compact \unet{}-like denoiser with residual blocks and sinusoidal time embeddings. Two conditioning options are supported:
+\begin{enumerate}
+\item \textbf{Class conditioning}: a learned embedding for the group label is injected into intermediate features \cite{dhariwal2021beatgans,ho2022cfg}.
+\item \textbf{Coordinate channels}: we concatenate local and absolute coordinate maps to the patch input, following CoordConv \cite{liu2018coordconv}. Coordinates are normalised to $[-1,1]$ and remain fixed during diffusion; the denoiser predicts only the image channel.
+\end{enumerate}
+
+\subsection{Training objective}
+\label{sec:loss}
+
+\paragraph{Patch-level \ddpm{} loss.}
+Given a clean patch $x_0 \in \mathbb{R}^{P\times P}$, timestep $t \sim \mathcal{U}\{1,\dots,T\}$, and noise $\epsilon \sim \mathcal{N}(0,I)$, the noised patch follows Eq.~\ref{eq:forward}, and we train the noise-prediction model with:
+\begin{equation}
+\mathcal{L}_{\mathrm{DDPM}}
+=\mathbb{E}_{x_0,t,\epsilon}\left[\left\|\epsilon-\epsilon_\theta(x_t,t,c)\right\|_2^2\right],
+\label{eq:lddpm}
+\end{equation}
+where $c$ denotes optional conditioning (class embedding and/or coordinate channels).
+
+\paragraph{Predicted clean patch.}
+From $\hat{\epsilon}=\epsilon_\theta(x_t,t,c)$ we compute the corresponding clean estimate:
+\begin{equation}
+\hat{x}_0=\frac{x_t-\sqrt{1-\bar{\alpha}_t}\,\hat{\epsilon}}{\sqrt{\bar{\alpha}_t}+\delta},
+\label{eq:x0hat}
+\end{equation}
+with a small $\delta>0$ for numerical stability.
+
+\subsection{Overlap consistency regularization}
+\label{sec:cons}
+For overlapping patch pairs extracted from the same image, we enforce agreement of predicted clean patches inside the overlap region $\Omega$:
+\begin{equation}
+\mathcal{L}_{\mathrm{cons}}
+=\frac{1}{|\Omega|}\sum_{(u,v)\in\Omega}\left|\hat{x}_{0,1}(u,v)-\hat{x}_{0,2}(u,v)\right|.
+\label{eq:lcons}
+\end{equation}
+The final objective is:
+\begin{equation}
+\mathcal{L}=\mathcal{L}_{\mathrm{DDPM}}+\lambda\,\mathcal{L}_{\mathrm{cons}}.
+\label{eq:ltotal}
+\end{equation}
+
+\subsection{Sampling and reconstruction with Hann-window blending}
+\label{sec:blend}
+To generate a full image, we define a patch grid with stride $S$ and sample patches at each grid location. Each generated patch $P_k$ is combined with a fixed \hann window $w$ and accumulated into a canvas:
+\begin{equation}
+X=\frac{\sum_k w\odot P_k}{\sum_k w+\varepsilon},
+\label{eq:blend}
+\end{equation}
+where $\odot$ denotes element-wise multiplication. Blending down-weights borders where seams are most visible; overlap consistency reduces disagreement in the overlap region before blending is applied.
+
+\subsection{Training stability and reproducibility practices}
+\label{sec:stability}
+We adopt:
+\begin{itemize}
+\item \textbf{Non-finite loss detection}: skip the optimiser step if the loss is NaN/Inf.
+\item \textbf{Gradient clipping}: cap the gradient norm (e.g., 1.0) to reduce spikes.
+\item \textbf{AdamW optimizer}: a stable choice for deep networks \cite{loshchilov2019adamw}.
+\item \textbf{Epoch-wise sampling}: save \npy{} and PNG outputs to monitor collapse/degenerate behavior.
+\end{itemize}
+
+% =========================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Dataset and groups}
+We use four groups of $128\times128$ images stored as NumPy arrays:
+	exttt{adhd} ($N=40$), \texttt{bd} ($N=49$), \texttt{health} ($N=121$), and \texttt{schz} ($N=27$).
+The training script logs dataset summary statistics (mean/std/min/max/quantiles and non-finite percentage), and it saves epoch-wise samples for qualitative monitoring.
+In an initial diagnostic pass, the \texttt{bd} array was found to be entirely non-finite; we repaired this group to a cleaned file (\texttt{bd\_49\_clean.npy}) via finite-value imputation before re-computing global normalisation statistics and running the final experiments.
+
+\subsection{Training configuration}
+Unless noted otherwise (final experiments with \texttt{patch260106.py}):
+\begin{itemize}
+\item Patch size $P=64$, stride $S=32$, diffusion steps $T=1000$
+\item 10 epochs, batch size 32, AdamW learning rate $2\times10^{-4}$ \cite{loshchilov2019adamw}
+\item Gradient clipping at 1.0
+\item Optional class-conditioning and coordinate channels enabled
+\item Overlap consistency enabled with $\lambda=0.2$
+\item DDIM sampling with 200 steps for full-image generation (trained with $T=1000$ noise steps)
+\end{itemize}
+
+\subsection{Baselines and ablations (recommended)}
+Natural ablations include:
+\begin{enumerate}
+\item \textbf{No consistency}: $\lambda=0$ (blending only)
+\item \textbf{No blending}: naive tiling/averaging (consistency only)
+\item \textbf{No coordinate channels}: remove spatial conditioning
+\item \textbf{Full model}: consistency + coordinates + \hann blending
+\end{enumerate}
+
+\subsection{Evaluation metrics}
+Beyond descriptive statistics, common similarity/distribution metrics include SSIM \cite{wang2004ssim} and FID \cite{heusel2017fid}. In medical contexts, FID should be computed in an appropriate feature space rather than ImageNet features. We report scale-consistent summary statistics as a robust baseline that does not depend on external feature extractors.
+
+% =========================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Fair real vs generated statistics}
+Table~\ref{tab:fair_stats} compares real data on raw intensity scale (0--255), real data on training scale ($\approx[-1,1]$), and generated samples on the same training scale. This fair comparison prevents misleading conclusions from mismatched units.
+
+A key finding is that the \texttt{bd} group has 100\% non-finite values, producing non-finite statistics. This can corrupt global $\mu,\sigma$ and explains why training logs can show repeated ``non-finite loss detected'' events. The result highlights that generative performance is inseparable from data integrity: a single corrupted subgroup can destabilise the entire pipeline.
+
+\subsection{Qualitative epoch-wise samples}
+The script saves epoch-wise samples as both \npy{} and PNG. Monitoring samples is essential because loss curves alone can be misleading if normalisation is corrupted or outputs collapse to low variance. Figure~\ref{fig:samples} summarises the evolution of generated images across epochs.
+
+\subsection{Interpreting the generated scale}
+Generated samples are stored in the training scale. For visualisation on 0--255, one can approximately invert normalisation:
+\[
+I \approx 5x\sigma + \mu,
+\] Then clip to the valid range. Because clipping is used in Eq.~\ref{eq:norm}, the inversion is approximate, but it enables consistent visualisation.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Fair comparison of real and generated images on consistent scales. Real data are shown in raw intensity (0--255) and on the normalised training scale (approximately [-1,1]). Generated samples are on the training scale.}
+\label{tab:fair_stats}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llr l r r r r r r}
+\toprule
+\textbf{Group} & \textbf{Name} & \textbf{N} & \textbf{Shape} & \textbf{Bad\%} & \textbf{Mean} & \textbf{Std} & \textbf{Min} & \textbf{Max} & \textbf{P01 / P99}\\
+\midrule
+REAL\_RAW\_0\_255 & adhd   & 40  & (40,128,128)  & 0.0   & 68.6943 & 54.8067 & 0.0000 & 255.0000 & 11.3948 / 228.8370 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & adhd & 40 & (40,128,128) & 0.0 & 0.0241 & 0.1916 & -0.2161 & 0.6754 & -0.1762 / 0.5839 \\
+REAL\_RAW\_0\_255 & bd     & 49  & (49,128,128)  & 100.0 & NaN     & NaN     & NaN    & NaN      & NaN / NaN \\
+REAL\_TRAIN\_SCALE\_-1\_1 & bd   & 49 & (49,128,128) & 100.0 & NaN    & NaN     & NaN    & NaN      & NaN / NaN \\
+REAL\_RAW\_0\_255 & health & 121 & (121,128,128) & 0.0   & 59.1283 & 58.7890 & 0.0000 & 255.0000 & 6.1855 / 235.1145 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & health & 121 & (121,128,128) & 0.0 & -0.0094 & 0.2055 & -0.2161 & 0.6754 & -0.1944 / 0.6059 \\
+REAL\_RAW\_0\_255 & schz   & 27  & (27,128,128)  & 0.0   & 63.5823 & 52.3887 & 0.0000 & 255.0000 & 11.2261 / 225.8346 \\
+REAL\_TRAIN\_SCALE\_-1\_1 & schz & 27 & (27,128,128) & 0.0 & 0.0062 & 0.1831 & -0.2161 & 0.6754 & -0.1768 / 0.5734 \\
+\midrule
+GENERATED\_-1\_1 & sample\_epoch\_1  & 1 & (128,128) & 0.0 & 0.0092 & 0.1492 & -0.5472 & 0.6030 & -0.3327 / 0.3844 \\
+GENERATED\_-1\_1 & sample\_epoch\_2  & 1 & (128,128) & 0.0 & 0.0064 & 0.1603 & -0.5880 & 0.6800 & -0.3704 / 0.3927 \\
+GENERATED\_-1\_1 & sample\_epoch\_3  & 1 & (128,128) & 0.0 & 0.0017 & 0.1776 & -0.6901 & 0.6916 & -0.4206 / 0.4275 \\
+GENERATED\_-1\_1 & sample\_epoch\_4  & 1 & (128,128) & 0.0 & -0.0068 & 0.1808 & -0.7177 & 0.6535 & -0.4286 / 0.4197 \\
+GENERATED\_-1\_1 & sample\_epoch\_5  & 1 & (128,128) & 0.0 & -0.0038 & 0.1964 & -0.6956 & 0.6947 & -0.4609 / 0.4587 \\
+GENERATED\_-1\_1 & sample\_epoch\_6  & 1 & (128,128) & 0.0 & -0.0204 & 0.1998 & -0.7150 & 0.6698 & -0.4864 / 0.4416 \\
+GENERATED\_-1\_1 & sample\_epoch\_7  & 1 & (128,128) & 0.0 & -0.0157 & 0.1998 & -0.6981 & 0.6634 & -0.4753 / 0.4569 \\
+GENERATED\_-1\_1 & sample\_epoch\_8  & 1 & (128,128) & 0.0 & -0.0261 & 0.2008 & -0.8862 & 0.6897 & -0.4935 / 0.4391 \\
+GENERATED\_-1\_1 & sample\_epoch\_9  & 1 & (128,128) & 0.0 & -0.0139 & 0.2221 & -0.8228 & 0.7292 & -0.5280 / 0.5025 \\
+GENERATED\_-1\_1 & sample\_epoch\_10 & 1 & (128,128) & 0.0 & -0.0143 & 0.2249 & -0.7653 & 0.7584 & -0.5428 / 0.5077 \\
+GENERATED\_-1\_1 & sample\_final     & 1 & (128,128) & 0.0 & -0.0005 & 0.2193 & -0.8010 & 0.7293 & -0.5108 / 0.5057 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+% =========================================================
+\section{Figures}
+\label{sec:figures}
+
+\begin{figure}[t]
+\centering
+\IfFileExists{paper_assets/figure1_pipeline.png}{
+  \includegraphics[width=0.98\linewidth]{paper_assets/figure1_pipeline.png}
+}{
+  \fbox{\parbox{0.95\linewidth}{\centering
+  \textbf{Figure 1 (missing file): Pipeline Diagram}\\[2mm]
+  Patch extraction $\rightarrow$ diffusion denoising $\rightarrow$ overlap consistency $\rightarrow$ \hann blending reconstruction\\[1mm]
+  \small Place: \texttt{paper\_assets/figure1\_pipeline.png}
+  }}
+}
+\caption{Pipeline overview: random patch extraction feeds a patch \ddpm{}; overlap consistency is enforced on predicted clean patches in shared overlap regions; full images are reconstructed by \hann-window weighted blending over an overlapping patch grid.}
+\label{fig:pipeline}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\IfFileExists{paper_assets/figure2_epoch_samples.png}{
+  \includegraphics[width=0.98\linewidth]{paper_assets/figure2_epoch_samples.png}
+}{
+  \fbox{\parbox{0.95\linewidth}{\centering
+  \textbf{Figure 2 (missing file): Epoch Samples Grid}\\[2mm]
+  Show \texttt{sample\_epoch\_1.png} \dots \texttt{sample\_epoch\_10.png} side-by-side\\[1mm]
+  \small Place: \texttt{paper\_assets/figure2\_epoch\_samples.png}
+  }}
+}
+\caption{Epoch-wise generated full images (grid). Qualitative monitoring is critical in diffusion training: losses alone can be misleading if normalisation is corrupted or if outputs collapse to low variance.}
+\label{fig:samples}
+\end{figure}
+
+% =========================================================
+\section{Code Availability and Reproducibility}
+\label{sec:code}
+The implementation associated with this paper is available at:
+\url{https://github.com/thebabak/Patch-Based-Denoising-Diffusion} \cite{babak2025repo}.
+The repository includes scripts for patch-based training, sampling, logging of epoch-wise outputs, and utilities for dataset statistics and sanity checks (in particular, the \texttt{patch260106.py} training script used for the final reported run \texttt{runs\_patch260106}). We recommend recording the commit hash used for experiments (e.g., in the run folder) to ensure exact reproducibility.
+
+% =========================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Why patch-based diffusion works for small datasets.}
+Patch extraction increases the number of training instances and allows more SGD updates per epoch for the same number of images, often improving sample efficiency. It also reduces memory load, enabling training on images that would otherwise be infeasible on commodity GPUs.
+
+\paragraph{Why seams happen and why our solution is complementary.}
+Seams arise when two adjacent or overlapping patches represent incompatible predictions near borders. \hann blending reduces seam visibility by weighting patch centres more than borders, but if patch predictions strongly disagree, blending can only partially hide artifacts. The overlap-consistency loss directly reduces disagreement in the shared region and improves local coherence before blending is applied.
+
+\paragraph{Data integrity is a first-class concern.}
+Our statistics reveal that one subgroup is entirely non-finite. This is not a minor detail: it can cause global mean/std to become non-finite, corrupt inputs, and yield non-finite loss across training. This motivates explicit sanity checks as part of every diffusion pipeline, particularly in medical contexts where preprocessing chains are complex.
+
+\paragraph{Practical recommendations.}
+Before training:
+\begin{itemize}
+\item Remove or repair any image with non-finite values.
+\item Compute $\mu,\sigma$ only on valid pixels.
+\item Log dataset statistics and sample visualisations.
+\end{itemize}
+During training:
+\begin{itemize}
+\item Enable non-finite loss checks and gradient clipping.
+\item Save epoch samples for qualitative inspection.
+\end{itemize}
+
+% =========================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+This work is primarily a practical, reproducible pipeline paper with sanity checks and fair scale-consistent statistics. Clear next steps include:
+\begin{itemize}
+\item \textbf{Clean-data re-training:} repair/remove corrupted groups (e.g., \texttt{bd}) and re-run experiments to quantify improvements in stability and sample quality.
+\item \textbf{Ablations:} report systematic comparisons of (i) no consistency, (ii) no blending, (iii) no coordinates, and (iv) full model.
+\item \textbf{Downstream utility:} evaluate augmentation utility by training a classifier/segmenter with and without synthetic samples and compare performance.
+\item \textbf{Distributional metrics:} add SSIM \cite{wang2004ssim} and feature-space distances; use FID carefully and adapt to medical feature extractors \cite{heusel2017fid}.
+\item \textbf{Faster sampling:} investigate DDIM \cite{song2020ddim} or DPM-Solver \cite{lu2022dpmsolver} to reduce sampling steps \cite{lu2022dpmsolver}.
+\end{itemize}
+
+% =========================================================
+\section{Conclusion}
+\label{sec:conclusion}
+We presented a patch-based diffusion framework with overlap consistency and \hann-window blending for full-image reconstruction, targeting small-scale neuroimaging-like datasets. The method is designed to be reproducible (single-script training, epoch-wise logging, and sanity checks) and emphasises practical stability issues that commonly arise in real medical data, including a demonstrated case where a fully corrupted subgroup can destabilise normalisation and diffusion losses. With cleaned data and full ablations, the approach can serve as a strong baseline for data-efficient diffusion synthesis and augmentation in medical imaging.
+
+% =========================================================
+% Bibliography (single-file, no BibTeX)
+% =========================================================
+\begin{thebibliography}{99}
+
+\bibitem{sohl2015thermo}
+J. Sohl-Dickstein, E. Weiss, N. Maheswaranathan, and S. Ganguli.
+\newblock Deep Unsupervised Learning using Nonequilibrium Thermodynamics.
+\newblock \emph{ICML}, 2015.
+\newblock \href{https://arxiv.org/abs/1503.03585}{arXiv:1503.03585}.
+
+\bibitem{ho2020ddpm}
+J. Ho, A. Jain, and P. Abbeel.
+\newblock Denoising Diffusion Probabilistic Models.
+\newblock \emph{NeurIPS}, 2020.
+\newblock \href{https://arxiv.org/abs/2006.11239}{arXiv:2006.11239}.
+
+\bibitem{nichol2021improved}
+A. Q. Nichol and P. Dhariwal.
+\newblock Improved Denoising Diffusion Probabilistic Models.
+\newblock \emph{ICML}, 2021.
+\newblock \href{https://arxiv.org/abs/2102.09672}{arXiv:2102.09672}.
+
+\bibitem{song2021sde}
+Y. Song, J. Sohl-Dickstein, D. P. Kingma, A. Kumar, S. Ermon, and B. Poole.
+\newblock Score-Based Generative Modelling through Stochastic Differential Equations.
+\newblock \emph{ICLR}, 2021.
+\newblock \href{https://arxiv.org/abs/2011.13456}{arXiv:2011.13456}.
+
+\bibitem{dhariwal2021beatgans}
+P. Dhariwal and A. Nichol.
+\newblock Diffusion Models Beat GANs on Image Synthesis.
+\newblock \emph{NeurIPS}, 2021.
+\newblock \href{https://arxiv.org/abs/2105.05233}{arXiv:2105.05233}.
+
+\bibitem{kingma2021vdm}
+D. P. Kingma, T. Salimans, B. Poole, and J. Ho.
+\newblock Variational Diffusion Models.
+\newblock \emph{NeurIPS}, 2021.
+\newblock \href{https://arxiv.org/abs/2107.00630}{arXiv:2107.00630}.
+
+\bibitem{song2020ddim}
+J. Song, C. Meng, and S. Ermon.
+\newblock Denoising Diffusion Implicit Models.
+\newblock \emph{ICLR}, 2021.
+\newblock \href{https://arxiv.org/abs/2010.02502}{arXiv:2010.02502}.
+
+\bibitem{ho2022cfg}
+J. Ho and T. Salimans.
+\newblock Classifier-Free Diffusion Guidance.
+\newblock 2022.
+\newblock \href{https://arxiv.org/abs/2207.12598}{arXiv:2207.12598}.
+
+\bibitem{karras2022edm}
+T. Karras, M. Aittala, T. Aila, and S. Laine.
+\newblock Elucidating the Design Space of Diffusion-Based Generative Models.
+\newblock \emph{NeurIPS}, 2022.
+\newblock \href{https://arxiv.org/abs/2206.00364}{arXiv:2206.00364}.
+
+\bibitem{lu2022dpmsolver}
+C. Lu, Y. Zhou, F. Bao, J. Chen, C. Li, and J. Zhu.
+\newblock DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps.
+\newblock \emph{NeurIPS}, 2022.
+\newblock \href{https://arxiv.org/abs/2206.00927}{arXiv:2206.00927}.
+
+\bibitem{rombach2022ldm}
+R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer.
+\newblock High-Resolution Image Synthesis with Latent Diffusion Models.
+\newblock \emph{CVPR}, 2022.
+\newblock \href{https://arxiv.org/abs/2112.10752}{arXiv:2112.10752}.
+
+\bibitem{kawar2022ddrm}
+B. Kawar, M. Elad, G. Milanfar, and J. Song.
+\newblock Denoising Diffusion Restoration Models.
+\newblock 2022.
+\newblock \href{https://arxiv.org/abs/2201.11793}{arXiv:2201.11793}.
+
+\bibitem{saharia2021sr3}
+C. Saharia, W. Chan, S. Saxena, L. Li, J. Whang, E. Denton, and others.
+\newblock Image Super-Resolution via Iterative Refinement.
+\newblock 2021.
+\newblock \href{https://arxiv.org/abs/2104.07636}{arXiv:2104.07636}.
+
+\bibitem{ronneberger2015unet}
+O. Ronneberger, P. Fischer, and T. Brox.
+\newblock U-Net: Convolutional Networks for Biomedical Image Segmentation.
+\newblock \emph{MICCAI}, 2015.
+\newblock \href{https://arxiv.org/abs/1505.04597}{arXiv:1505.04597}.
+
+\bibitem{liu2018coordconv}
+R. Liu, J. Lehman, P. Molino, F. Such, E. Frank, A. Sergeev, and J. Yosinski.
+\newblock An Intriguing Failing of Convolutional Neural Networks and the CoordConv Solution.
+\newblock 2018.
+\newblock \href{https://arxiv.org/abs/1807.03247}{arXiv:1807.03247}.
+
+\bibitem{wang2023patchdiffusion}
+Y. Wang, Y. Sun, Z. Chen, and Y. Qiao.
+\newblock Patch Diffusion: A Generative Model for Images as a Collection of Patches.
+\newblock \emph{NeurIPS}, 2023.
+\newblock \href{https://openreview.net/forum?id=iv2sTQtbst}{OpenReview}.
+
+\bibitem{kazerouni2023medsurvey}
+A. Kazerouni, E. K. Aghdam, M. Heidari, R. Azad, M. Fayyaz, I. Hacihaliloglu, and D. Merhof.
+\newblock Diffusion Models for Medical Image Analysis: A Comprehensive Survey.
+\newblock 2023.
+\newblock \href{https://arxiv.org/abs/2211.07804}{arXiv:2211.07804}.
+
+\bibitem{wolleb2022midl}
+J. Wolleb, R. Sandk\"{u}hler, F. Bieder, P. Valmaggia, and P. C. Cattin.
+\newblock Diffusion Models for Implicit Image Segmentation Ensembles.
+\newblock \emph{MIDL (PMLR)}, 2022.
+\newblock \href{https://proceedings.mlr.press/v172/wolleb22a.html}{PMLR v172}.
+
+\bibitem{loshchilov2019adamw}
+I. Loshchilov and F. Hutter.
+\newblock Decoupled Weight Decay Regularisation.
+\newblock \emph{ICLR}, 2019.
+\newblock \href{https://arxiv.org/abs/1711.05101}{arXiv:1711.05101}.
+
+\bibitem{wang2004ssim}
+Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli.
+\newblock Image Quality Assessment: From Error Visibility to Structural Similarity.
+\newblock \emph{IEEE Transactions on Image Processing}, 2004.
+
+\bibitem{heusel2017fid}
+M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter.
+\newblock GANs Trained by a Two-Time-Scale Update Rule Converge to a Local Nash Equilibrium.
+\newblock \emph{NeurIPS}, 2017.
+
+\bibitem{goodfellow2014gan}
+I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio.
+\newblock Generative Adversarial Nets.
+\newblock \emph{NeurIPS}, 2014.
+
+\bibitem{mirza2014cgan}
+M. Mirza and S. Osindero.
+\newblock Conditional Generative Adversarial Nets.
+\newblock 2014.
+\newblock \href{https://arxiv.org/abs/1411.1784}{arXiv:1411.1784}.
+
+\bibitem{radford2016dcgan}
+A. Radford, L. Metz, and S. Chintala.
+\newblock Unsupervised Representation Learning with Deep Convolutional GANs.
+\newblock \emph{ICLR}, 2016.
+\newblock \href{https://arxiv.org/abs/1511.06434}{arXiv:1511.06434}.
+
+\bibitem{babak2025repo}
+B. Bayanian and S. Masoudnia.
+\newblock Patch-Based Denoising Diffusion with Overlap Consistency and Hann-Window Blending (Code Repository).
+\newblock GitHub, 2025.
+\newblock \url{https://github.com/thebabak/Patch-Based-Denoising-Diffusion}.
+
+\end{thebibliography}
+
+\end{document}
